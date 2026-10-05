@@ -16,7 +16,7 @@ A creative-sharing platform sends a piece of text to `POST /submit`. The path it
 8. **Audit log (SQLite)** records the decision: content_id, timestamp, both signal scores, combined score, verdict, and label.
 9. The API returns `{content_id, attribution, confidence, label, signals}`.
 
-If a creator disagrees, `POST /appeal` takes `{content_id, reasoning}`. The system looks up the original decision, sets the content's status to `under_review`, writes an appeal record linked to the original decision, appends an audit-log entry, and returns confirmation. `GET /log` and `GET /content/<id>` read from the same store.
+If a creator disagrees, `POST /appeal` takes `{content_id, creator_reasoning}`. The system looks up the original decision, sets the content's status to `under_review`, writes an appeal record linked to the original decision, appends an audit-log entry, and returns confirmation. `GET /log` and `GET /content/<id>` read from the same store.
 
 ## Detection signals
 
@@ -98,10 +98,10 @@ Design notes:
 ## Appeals workflow
 
 - **Who:** the creator of the content, identified by the `creator_id` that matches the original submission. (No real auth in this project, so this is a simple match check.)
-- **What they provide:** `content_id` and `reasoning` (required, free text, e.g. "I have my drafts and notes" or "this is my minimalist style").
+- **What they provide:** `content_id` and `creator_reasoning` (required, free text, e.g. "I have my drafts and notes" or "this is my minimalist style").
 - **What the system does:**
   1. Looks up the content and its original decision (404 if missing).
-  2. Rejects if `creator_id` doesn't match (403), if reasoning is empty (400), or if an appeal is already open (409).
+  2. Rejects if an optional `creator_id` is supplied and doesn't match (403; it is optional because there is no real auth in this project), if reasoning is empty (400), or if an appeal is already open (409).
   3. Sets the content's status `classified` → `under_review`.
   4. Writes an `appeals` row linked to the original decision (`decision_id`).
   5. Appends an audit-log entry of type `appeal` with the reasoning, the original verdict and scores, and a timestamp.
@@ -118,7 +118,7 @@ Design notes:
 
 ## Rate limiting
 
-- `POST /submit`: **5 per minute and 50 per day per client IP** (Flask-Limiter).
+- `POST /submit`: **5 per minute and 50 per day per client IP** (Flask-Limiter). Tested: 12 rapid requests gave five `201`s then `429`s.
 - `POST /appeal`: 10 per hour per IP.
 - **Reasoning:** a real creator posts a handful of pieces per day, and 5 per minute leaves room for a burst of re-submits while editing. An adversary flooding the endpoint, or probing for text that slips past the detector, would hit the limit fast. It also protects the free Groq quota. The limiter returns `429` before any detection runs.
 
@@ -127,7 +127,7 @@ Design notes:
 | Endpoint | Accepts | Returns |
 |---|---|---|
 | `POST /submit` | JSON `{creator_id: str, text: str}` | `201` `{content_id, attribution, confidence, label, signals: {llm, stylometric}, status}`. `400` on bad input, `429` when rate limited. |
-| `POST /appeal` | JSON `{content_id: str, reasoning: str}` | `200` `{content_id, status: "under_review", appeal_id}`. `404` if the content is unknown, `400` if reasoning is empty, `409` if an appeal is already open. |
+| `POST /appeal` | JSON `{content_id: str, creator_reasoning: str, creator_id?: str}` | `200` `{content_id, status: "under_review", appeal_id}`. `404` if the content is unknown, `400` if reasoning is empty, `409` if an appeal is already open. |
 | `GET /content/<content_id>` | none | Current status, original decision, label, and any appeal. |
 | `GET /log` | optional `?limit=` | Structured audit entries, newest first (decisions and appeals). |
 
@@ -168,16 +168,16 @@ Response {content_id, attribution, confidence, label, signals}
 
 ```text
 Client
-  |  POST /appeal {content_id, reasoning}
+  |  POST /appeal {content_id, creator_reasoning}
   v
 [Validation + lookup original decision] --not found--> 404
-  |  content_id, reasoning, original decision
+  |  content_id, creator_reasoning, original decision
   v
 [Status update: classified -> under_review]
   |  appeal record linked to decision
   v
 [SQLite: appeals + audit_log]
-  |  appeal entry (reasoning, original verdict, timestamp)
+  |  appeal entry (appeal_reasoning, original verdict, timestamp)
   v
 Response {content_id, status: "under_review", appeal_id}
 ```
